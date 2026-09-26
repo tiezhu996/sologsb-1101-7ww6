@@ -72,7 +72,24 @@ function go(path: string): void {
 
     <footer class="app-footer">
       <span>数据仅存于本浏览器（IndexedDB / localStorage），不上传任何服务器。</span>
-      <span>当前殿宇：{{ hallStore.currentHall ? hallStore.currentHall.name : '未选择' }}</span>
+      <span class="app-footer__current">
+        当前殿宇：{{ hallStore.currentHall ? hallStore.currentHall.name : '未选择' }}
+        <el-tag
+          v-if="hallStore.currentHall"
+          size="small"
+          :type="
+            hallStore.currentHall.disposalStatus === '已移交'
+              ? 'success'
+              : hallStore.currentHall.disposalStatus === '修缮中'
+                ? 'warning'
+                : 'info'
+          "
+          effect="plain"
+          round
+        >
+          {{ hallStore.currentHall.disposalStatus }}
+        </el-tag>
+      </span>
     </footer>
   </div>
 </template>
@@ -185,5 +202,11 @@ function go(path: string): void {
   padding: 12px 24px 20px;
   font-size: 12px;
   color: #8c8479;
+}
+
+.app-footer__current {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 </style>

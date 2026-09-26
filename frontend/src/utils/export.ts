@@ -6,6 +6,37 @@ import {
   stampBackupTime,
   type BackupPayload
 } from '@/utils/db'
+import type { Hall, HandoverRecord } from '@/types/hall'
+import { DISPOSAL_STATUSES } from '@/types/hall'
+
+/** 旧备份（v2 及更早）的殿宇没有处置状态，导入后统一按「在册」处理 */
+function normalizeHall(input: Partial<Hall>): Hall | null {
+  if (typeof input !== 'object' || input === null || typeof input.id !== 'string') return null
+  const status = DISPOSAL_STATUSES.includes(input.disposalStatus as Hall['disposalStatus'])
+    ? (input.disposalStatus as Hall['disposalStatus'])
+    : '在册'
+  const handoverRecords = Array.isArray(input.handoverRecords)
+    ? (input.handoverRecords as HandoverRecord[]).filter(
+        (record) => record && (record.type === 'handover' || record.type === 'withdraw')
+      )
+    : []
+  return {
+    id: input.id,
+    name: typeof input.name === 'string' ? input.name : '未命名殿宇',
+    era: typeof input.era === 'string' ? input.era : '',
+    structureType: input.structureType === '大木' || input.structureType === '小式' ? input.structureType : '大木',
+    roofType:
+      input.roofType === '庑殿' || input.roofType === '歇山' || input.roofType === '悬山'
+        ? input.roofType
+        : '庑殿',
+    disposalStatus: status,
+    // 旧备份无移交相关字段：移交时间与留痕均置空（在册殿宇本就不应有）
+    handoverAt: typeof input.handoverAt === 'number' ? input.handoverAt : null,
+    handoverRecords: status === '在册' && handoverRecords.length === 0 ? [] : handoverRecords,
+    createdAt: typeof input.createdAt === 'number' ? input.createdAt : Date.now(),
+    updatedAt: typeof input.updatedAt === 'number' ? input.updatedAt : Date.now()
+  }
+}
 
 /** 校验备份对象的必备字段，返回错误信息数组（为空表示通过） */
 export function validateBackup(input: unknown): { ok: boolean; errors: string[]; payload: BackupPayload | null } {
@@ -26,11 +57,15 @@ export function validateBackup(input: unknown): { ok: boolean; errors: string[];
     if (!Array.isArray(obj[key])) errors.push(`${key} 字段缺失或不是数组`)
   }
   if (errors.length > 0) return { ok: false, errors, payload: null }
+  // 殿宇逐行归一化：旧版本备份缺少处置状态等字段时补默认值（统一按在册）
+  const halls = (obj.halls ?? [])
+    .map((item) => normalizeHall(item as Partial<Hall>))
+    .filter((item): item is Hall => item !== null)
   const payload: BackupPayload = {
     app: 'gbmuralarch',
     dbVersion: typeof obj.dbVersion === 'number' ? obj.dbVersion : DB_VERSION,
     exportedAt: typeof obj.exportedAt === 'string' ? obj.exportedAt : new Date().toISOString(),
-    halls: obj.halls ?? [],
+    halls,
     elements: obj.elements ?? [],
     layers: obj.layers ?? [],
     decays: obj.decays ?? [],
@@ -175,6 +210,9 @@ export async function seedDemoData(): Promise<void> {
         era: '明嘉靖',
         structureType: '大木',
         roofType: '庑殿',
+        disposalStatus: '修缮中',
+        handoverAt: null,
+        handoverRecords: [],
         createdAt: now,
         updatedAt: now
       })

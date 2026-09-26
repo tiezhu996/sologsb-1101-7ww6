@@ -51,7 +51,11 @@ const counts = computed(() => ({
 }))
 
 const storageRows = computed(() => [
-  { table: 'halls（殿宇）', key: 'id, name, era, structureType, roofType, updatedAt', count: counts.value.halls },
+  {
+    table: 'halls（殿宇）',
+    key: 'id, name, era, structureType, roofType, disposalStatus, handoverAt, updatedAt',
+    count: counts.value.halls
+  },
   { table: 'elements（构件）', key: 'id, hallId, position, status, updatedAt', count: counts.value.elements },
   { table: 'layers（彩画层位）', key: 'id, elementId, level, patternName, pigment', count: counts.value.layers },
   {
@@ -214,7 +218,9 @@ const previewKeys: Array<{ key: keyof Pick<BackupPayload, 'halls' | 'elements' |
         </el-table-column>
       </el-table>
       <p class="muted storage-note">
-        版本 1 → 2 的迁移：decays 表补充 repairedAt 索引，修复状态字段缺失的历史数据按 updatedAt 回填。
+        版本 1 → 2：decays 表补充 repairedAt 索引，修复状态字段缺失的历史数据按 updatedAt 回填；
+        版本 2 → 3：halls 表补充 disposalStatus（在册 / 修缮中 / 已移交）与 handoverAt 索引，
+        历史殿宇回填为「在册」。旧备份导入时缺少处置状态的殿宇也统一按「在册」处理。
       </p>
     </div>
 

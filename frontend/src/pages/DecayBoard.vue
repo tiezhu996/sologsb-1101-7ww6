@@ -8,8 +8,8 @@ import FilterBar, { type FilterModel } from '@/components/common/FilterBar.vue'
 import SeverityTag from '@/components/common/SeverityTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import { useDecayFilter } from '@/hooks/useDecayFilter'
-import { useHallStore } from '@/stores/hallStore'
-import { useDecayStore } from '@/stores/decayStore'
+import { useHallStore, HALL_LOCKED_MESSAGE } from '@/stores/hallStore'
+import { useDecayStore, type DecayRow } from '@/stores/decayStore'
 import { useRepairStore } from '@/stores/repairStore'
 import { DECAY_TYPES, type Decay, type DecayType, type Severity } from '@/types/decay'
 import { SEVERITIES } from '@/types/decay'
@@ -72,8 +72,10 @@ watch(
   () => sortedRows.value.map((row) => row.decay.id).join(','),
   () => {
     const visible = new Set(sortedRows.value.map((row) => row.decay.id))
+    const locked = new Set(sortedRows.value.filter((row) => isRowLocked(row)).map((row) => row.decay.id))
     Array.from(decayStore.selectedIds).forEach((id) => {
-      if (!visible.has(id)) decayStore.selectedIds.delete(id)
+      // 离屏或所属殿宇已移交的行不保留选中，避免批量操作被只读守卫拦截
+      if (!visible.has(id) || locked.has(id)) decayStore.selectedIds.delete(id)
     })
   }
 )
@@ -121,9 +123,28 @@ function hallLabel(layerId: string): string {
   return hallStore.hallById(element.hallId)?.name ?? '殿宇已删除'
 }
 
+/** 该行病害所属殿宇是否已移交（只读） */
+function isRowLocked(row: DecayRow): boolean {
+  return Boolean(row.hallId && !hallStore.isHallEditable(row.hallId))
+}
+
+/** 已移交殿宇的行不可勾选，避免被批量修改 */
+function isRowSelectable(row: DecayRow): boolean {
+  return !isRowLocked(row)
+}
+
 function repairProgress(decayId: string): { done: number; total: number } {
   const steps = repairStore.steps.filter((step) => step.decayId === decayId)
   return { done: steps.filter((step) => step.state === '已完成').length, total: steps.length }
+}
+
+/** 拦截只读行的写操作，提示到殿宇总览走撤回流程 */
+function guardRow(row: DecayRow): boolean {
+  if (isRowLocked(row)) {
+    ElMessage.warning(HALL_LOCKED_MESSAGE)
+    return false
+  }
+  return true
 }
 
 async function applyBatchSeverity(): Promise<void> {
@@ -132,8 +153,12 @@ async function applyBatchSeverity(): Promise<void> {
     ElMessage.warning('请先勾选需要修改的病害记录')
     return
   }
-  await decayStore.bulkSetSeverity(ids, batchSeverity.value)
-  ElMessage.success(`已将 ${ids.length} 条病害的严重程度改为「${batchSeverity.value}」`)
+  try {
+    await decayStore.bulkSetSeverity(ids, batchSeverity.value)
+    ElMessage.success(`已将 ${ids.length} 条病害的严重程度改为「${batchSeverity.value}」`)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '批量修改失败')
+  }
 }
 
 async function applyBatchType(): Promise<void> {
@@ -142,11 +167,16 @@ async function applyBatchType(): Promise<void> {
     ElMessage.warning('请先勾选需要修改的病害记录')
     return
   }
-  await decayStore.bulkSetType(ids, batchType.value)
-  ElMessage.success(`已将 ${ids.length} 条病害的类型改为「${batchType.value}」`)
+  try {
+    await decayStore.bulkSetType(ids, batchType.value)
+    ElMessage.success(`已将 ${ids.length} 条病害的类型改为「${batchType.value}」`)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '批量修改失败')
+  }
 }
 
-function openEdit(row: { decay: Decay }): void {
+function openEdit(row: DecayRow): void {
+  if (!guardRow(row)) return
   editingDecay.value = row.decay
   editForm.value = {
     type: row.decay.type,
@@ -159,17 +189,22 @@ function openEdit(row: { decay: Decay }): void {
 
 async function submitEdit(): Promise<void> {
   if (!editingDecay.value) return
-  await decayStore.updateDecay(editingDecay.value.id, {
-    type: editForm.value.type,
-    severity: editForm.value.severity,
-    areaCm2: editForm.value.areaCm2,
-    causeGuess: editForm.value.causeGuess.trim() || '待现场复核'
-  })
-  editDialogVisible.value = false
-  ElMessage.success('病害记录已更新')
+  try {
+    await decayStore.updateDecay(editingDecay.value.id, {
+      type: editForm.value.type,
+      severity: editForm.value.severity,
+      areaCm2: editForm.value.areaCm2,
+      causeGuess: editForm.value.causeGuess.trim() || '待现场复核'
+    })
+    editDialogVisible.value = false
+    ElMessage.success('病害记录已更新')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '保存失败')
+  }
 }
 
-async function removeRow(row: { decay: Decay }): Promise<void> {
+async function removeRow(row: DecayRow): Promise<void> {
+  if (!guardRow(row)) return
   const confirmed = await ElMessageBox.confirm(
     `删除「${row.decay.type}」病害记录及其关联修复工序？`,
     '删除确认',
@@ -180,7 +215,8 @@ async function removeRow(row: { decay: Decay }): Promise<void> {
   ElMessage.success('病害记录已删除')
 }
 
-async function toggleRepaired(row: { decay: Decay }): Promise<void> {
+async function toggleRepaired(row: DecayRow): Promise<void> {
+  if (!guardRow(row)) return
   await decayStore.setRepaired(row.decay.id, !row.decay.repaired)
   ElMessage.success(row.decay.repaired ? '已标记为未修复' : '已标记为已修复')
 }
@@ -191,18 +227,22 @@ async function bulkMarkRepaired(repaired: boolean): Promise<void> {
     ElMessage.warning('请先勾选需要处理的病害记录')
     return
   }
-  for (const id of ids) {
-    await decayStore.setRepaired(id, repaired)
+  try {
+    for (const id of ids) {
+      await decayStore.setRepaired(id, repaired)
+    }
+    ElMessage.success(`已批量标记 ${ids.length} 条为${repaired ? '已修复' : '未修复'}`)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '批量标记失败')
   }
-  ElMessage.success(`已批量标记 ${ids.length} 条为${repaired ? '已修复' : '未修复'}`)
 }
 
-function goRepair(row: { decay: Decay }): void {
+function goRepair(row: DecayRow): void {
   repairStore.setActiveDecay(row.decay.id)
   void router.push('/repair')
 }
 
-function goElements(row: { decay: Decay }): void {
+function goElements(row: DecayRow): void {
   const layer = decayStore.layers.find((item) => item.id === row.decay.layerId)
   const element = layer ? decayStore.elements.find((item) => item.id === layer.elementId) : undefined
   if (!element) {
@@ -213,7 +253,7 @@ function goElements(row: { decay: Decay }): void {
   void router.push(`/halls/${element.hallId}/elements`)
 }
 
-function rowKey(row: { decay: Decay }): string {
+function rowKey(row: DecayRow): string {
   return row.decay.id
 }
 
@@ -320,7 +360,7 @@ const severityPalette = SEVERITY_COLOR
         :row-key="rowKey"
         @selection-change="handleSelectionChange"
       >
-        <el-table-column type="selection" width="46" reserve-selection />
+        <el-table-column type="selection" width="46" reserve-selection :selectable="isRowSelectable" />
         <el-table-column label="病害类型" width="100">
           <template #default="{ row }">
             <el-tag size="small" effect="plain">{{ row.decay.type }}</el-tag>
@@ -331,8 +371,11 @@ const severityPalette = SEVERITY_COLOR
             <SeverityTag :severity="row.decay.severity" :area-cm2="row.decay.areaCm2" size="small" />
           </template>
         </el-table-column>
-        <el-table-column label="殿宇" width="150">
-          <template #default="{ row }">{{ hallLabel(row.decay.layerId) }}</template>
+        <el-table-column label="殿宇" width="180">
+          <template #default="{ row }">
+            <span>{{ hallLabel(row.decay.layerId) }}</span>
+            <el-tag v-if="isRowLocked(row)" size="small" type="success" effect="dark" class="locked-tag">已移交</el-tag>
+          </template>
         </el-table-column>
         <el-table-column label="构件（部位）" min-width="190">
           <template #default="{ row }">{{ elementLabel(row.decay.layerId) }}</template>
@@ -353,13 +396,17 @@ const severityPalette = SEVERITY_COLOR
         </el-table-column>
         <el-table-column label="操作" width="260" fixed="right">
           <template #default="{ row }">
-            <el-button size="small" text :icon="Edit" @click="openEdit(row)">编辑</el-button>
+            <el-button size="small" text :icon="Edit" :disabled="isRowLocked(row)" @click="openEdit(row)">
+              编辑
+            </el-button>
             <el-button size="small" text :icon="Tools" @click="goRepair(row)">排工序</el-button>
             <el-button size="small" text type="primary" @click="goElements(row)">看层位</el-button>
-            <el-button size="small" text @click="toggleRepaired(row)">
+            <el-button size="small" text :disabled="isRowLocked(row)" @click="toggleRepaired(row)">
               {{ row.decay.repaired ? '撤销修复' : '标记修复' }}
             </el-button>
-            <el-button size="small" text type="danger" :icon="Delete" @click="removeRow(row)">删除</el-button>
+            <el-button size="small" text type="danger" :icon="Delete" :disabled="isRowLocked(row)" @click="removeRow(row)">
+              删除
+            </el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -437,5 +484,9 @@ const severityPalette = SEVERITY_COLOR
 .repair-progress {
   margin-left: 6px;
   font-size: 12px;
+}
+
+.locked-tag {
+  margin-left: 6px;
 }
 </style>

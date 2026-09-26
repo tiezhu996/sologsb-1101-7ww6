@@ -6,7 +6,7 @@ import type { Decay } from '@/types/decay'
 import type { RepairStep } from '@/types/repair'
 
 /** 本地结构版本号：新增/修改表结构时必须递增，并补充 upgrade 迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** 本地存储键名（localStorage 侧的少量元数据） */
 export const LS_KEYS = {
@@ -54,7 +54,7 @@ export class MuralArchDatabase extends Dexie {
       repairSteps: 'id, decayId, seq, state, updatedAt'
     })
     // v2：病害表补充 repairedAt 索引，工序表补充 name 索引
-    this.version(DB_VERSION)
+    this.version(2)
       .stores({
         halls: 'id, name, era, structureType, roofType, updatedAt',
         elements: 'id, hallId, position, status, updatedAt',
@@ -74,6 +74,27 @@ export class MuralArchDatabase extends Dexie {
             if (typeof decay.repaired !== 'boolean') {
               decay.repaired = false
             }
+          })
+      })
+    // v3：殿宇表补充处置状态与移交时间索引，并为历史殿宇回填「在册」
+    this.version(DB_VERSION)
+      .stores({
+        halls: 'id, name, era, structureType, roofType, disposalStatus, handoverAt, updatedAt',
+        elements: 'id, hallId, position, status, updatedAt',
+        layers: 'id, elementId, level, patternName, pigment',
+        decays: 'id, layerId, type, severity, repaired, repairedAt, updatedAt',
+        repairSteps: 'id, decayId, seq, name, state, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table<Hall>('halls')
+          .toCollection()
+          .modify((hall) => {
+            if (hall.disposalStatus !== '在册' && hall.disposalStatus !== '修缮中' && hall.disposalStatus !== '已移交') {
+              hall.disposalStatus = '在册'
+            }
+            if (hall.handoverAt === undefined) hall.handoverAt = null
+            if (!Array.isArray(hall.handoverRecords)) hall.handoverRecords = []
           })
       })
   }

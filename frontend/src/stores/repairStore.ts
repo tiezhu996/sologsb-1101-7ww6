@@ -23,6 +23,12 @@ export const useRepairStore = defineStore('repair', () => {
 
   const steps = computed<RepairStep[]>(() => repairTable.rows.value)
 
+  /** 工序所属病害是否可编辑（已移交殿宇只读） */
+  function assertStepEditable(stepId: string): void {
+    const step = steps.value.find((item) => item.id === stepId)
+    if (step) hallStore.assertDecayEditable(step.decayId)
+  }
+
   /** 按病害归组的工序时间线 */
   const groups = computed<RepairGroup[]>(() => {
     const layerMap = new Map<string, PaintLayer>()
@@ -115,6 +121,7 @@ export const useRepairStore = defineStore('repair', () => {
     state?: RepairState
     seq?: number
   }): Promise<RepairStep> {
+    hallStore.assertDecayEditable(payload.decayId)
     const step = await repairTable.create(
       {
         decayId: payload.decayId,
@@ -131,6 +138,7 @@ export const useRepairStore = defineStore('repair', () => {
   }
 
   async function updateStep(id: string, patch: Partial<RepairStep>): Promise<void> {
+    assertStepEditable(id)
     await repairTable.update(id, patch)
     const step = steps.value.find((item) => item.id === id)
     if (step) await syncDecayState(step.decayId)
@@ -139,12 +147,14 @@ export const useRepairStore = defineStore('repair', () => {
   async function removeStep(id: string): Promise<void> {
     const step = steps.value.find((item) => item.id === id)
     if (!step) return
+    hallStore.assertDecayEditable(step.decayId)
     await repairTable.remove(id)
     await normalizeSeq(step.decayId)
     await syncDecayState(step.decayId)
   }
 
   async function removeGroup(decayId: string): Promise<void> {
+    hallStore.assertDecayEditable(decayId)
     const ids = steps.value.filter((step) => step.decayId === decayId).map((step) => step.id)
     await repairTable.bulkRemove(ids)
     await syncDecayState(decayId)
@@ -152,6 +162,7 @@ export const useRepairStore = defineStore('repair', () => {
 
   /** 拖拽后按新顺序批量回写 seq */
   async function reorder(decayId: string, orderedIds: string[]): Promise<void> {
+    hallStore.assertDecayEditable(decayId)
     const now = Date.now()
     await db.transaction('rw', db.repairSteps, async () => {
       for (let index = 0; index < orderedIds.length; index += 1) {
@@ -172,6 +183,7 @@ export const useRepairStore = defineStore('repair', () => {
   async function setStepState(id: string, state: RepairState): Promise<void> {
     const step = steps.value.find((item) => item.id === id)
     if (!step) return
+    hallStore.assertDecayEditable(step.decayId)
     await repairTable.update(id, { state })
     await syncDecayState(step.decayId)
   }
@@ -199,6 +211,7 @@ export const useRepairStore = defineStore('repair', () => {
 
   /** 一键为某殿宇下所有未修复病害补齐标准工序链 */
   async function scaffoldForHall(hallId: string, template: RepairStepName[]): Promise<number> {
+    hallStore.assertHallEditable(hallId)
     const targets = decayStore.rows.filter(
       (row) => row.hallId === hallId && !steps.value.some((step) => step.decayId === row.decay.id)
     )

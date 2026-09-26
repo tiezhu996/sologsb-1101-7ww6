@@ -6,11 +6,12 @@ import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import SeverityTag from '@/components/common/SeverityTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import { useDecayStore } from '@/stores/decayStore'
-import { useHallStore } from '@/stores/hallStore'
+import { useHallStore, HALL_LOCKED_MESSAGE } from '@/stores/hallStore'
 import { useRepairStore } from '@/stores/repairStore'
 import type { RepairGroup } from '@/types/repair'
 import { REPAIR_STATES, REPAIR_STEP_NAMES, type RepairState, type RepairStep, type RepairStepName } from '@/types/repair'
 import { formatArea } from '@/utils/severity'
+import type { Decay } from '@/types/decay'
 
 const hallStore = useHallStore()
 const decayStore = useDecayStore()
@@ -70,6 +71,27 @@ const hallOptions = computed(() =>
   hallStore.halls.map((hall) => ({ label: `${hall.name}（${hall.era}）`, value: hall.id }))
 )
 
+/** 批量生成工序只可选择非已移交殿宇 */
+const editableHallOptions = computed(() =>
+  hallStore.halls
+    .filter((hall) => hall.disposalStatus !== '已移交')
+    .map((hall) => ({ label: `${hall.name}（${hall.era}）`, value: hall.id }))
+)
+
+/** 时间线分组所属殿宇是否已移交（只读） */
+function isGroupLocked(group: RepairGroup): boolean {
+  return Boolean(group.element && !hallStore.isHallEditable(group.element.hallId))
+}
+
+/** 待编排病害是否属于已移交殿宇 */
+function isDecayLocked(decay: Decay): boolean {
+  return !hallStore.isDecayEditable(decay.id)
+}
+
+function denyLocked(): void {
+  ElMessage.warning(HALL_LOCKED_MESSAGE)
+}
+
 const groups = computed<RepairGroup[]>(() =>
   repairStore.groups.filter((group) => {
     if (hallFilter.value && group.element?.hallId !== hallFilter.value) return false
@@ -122,6 +144,11 @@ function groupSubtitle(group: RepairGroup): string {
 }
 
 function openStepDialog(decayId: string, step?: RepairStep): void {
+  // 已移交殿宇：禁止追加 / 编辑工序
+  if (!hallStore.isDecayEditable(decayId)) {
+    denyLocked()
+    return
+  }
   stepForm.decayId = decayId
   if (step) {
     editingStepId.value = step.id
@@ -163,15 +190,27 @@ async function submitStep(): Promise<void> {
 }
 
 async function removeStep(step: RepairStep): Promise<void> {
+  if (!hallStore.isDecayEditable(step.decayId)) {
+    denyLocked()
+    return
+  }
   const confirmed = await ElMessageBox.confirm(`删除工序「${step.name}」？`, '删除确认', { type: 'warning' }).catch(
     () => false
   )
   if (!confirmed) return
-  await repairStore.removeStep(step.id)
-  ElMessage.success('工序已删除')
+  try {
+    await repairStore.removeStep(step.id)
+    ElMessage.success('工序已删除')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '删除失败')
+  }
 }
 
 async function removeGroup(group: RepairGroup): Promise<void> {
+  if (isGroupLocked(group)) {
+    denyLocked()
+    return
+  }
   const confirmed = await ElMessageBox.confirm(
     `清空「${groupTitle(group)}」的全部 ${group.steps.length} 道工序？`,
     '删除确认',
@@ -183,25 +222,40 @@ async function removeGroup(group: RepairGroup): Promise<void> {
 }
 
 async function changeState(step: RepairStep, state: RepairState): Promise<void> {
-  await repairStore.setStepState(step.id, state)
-  const group = repairStore.groupOf(step.decayId)
-  if (state === '已完成' && group && group.doneCount === group.totalCount) {
-    ElMessage.success('该病害全部工序完成，病害已回写为「已修复」')
-  } else {
-    ElMessage.success(`工序状态已改为「${state}」`)
+  try {
+    await repairStore.setStepState(step.id, state)
+    const group = repairStore.groupOf(step.decayId)
+    if (state === '已完成' && group && group.doneCount === group.totalCount) {
+      ElMessage.success('该病害全部工序完成，病害已回写为「已修复」')
+    } else {
+      ElMessage.success(`工序状态已改为「${state}」`)
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '状态更新失败')
   }
 }
 
 function onDragStart(step: RepairStep): void {
+  if (!hallStore.isDecayEditable(step.decayId)) {
+    denyLocked()
+    return
+  }
   draggingId.value = step.id
 }
 
 function onDragOver(step: RepairStep, event: DragEvent): void {
+  if (!hallStore.isDecayEditable(step.decayId)) return
   event.preventDefault()
   dragOverId.value = step.id
 }
 
 async function onDrop(group: RepairGroup, target: RepairStep): Promise<void> {
+  if (isGroupLocked(group)) {
+    denyLocked()
+    draggingId.value = null
+    dragOverId.value = null
+    return
+  }
   const sourceId = draggingId.value
   draggingId.value = null
   dragOverId.value = null
@@ -214,7 +268,11 @@ async function onDrop(group: RepairGroup, target: RepairStep): Promise<void> {
 }
 
 async function openScratch(): Promise<void> {
-  scratchHallId.value = hallFilter.value || hallStore.halls[0]?.id || ''
+  const preferred = hallFilter.value
+  scratchHallId.value =
+    preferred && hallStore.isHallEditable(preferred)
+      ? preferred
+      : editableHallOptions.value[0]?.value || ''
   scratchDialogVisible.value = true
 }
 
@@ -227,17 +285,25 @@ async function submitScratch(): Promise<void> {
     ElMessage.warning('请至少选择一道工序')
     return
   }
-  const count = await repairStore.scaffoldForHall(scratchHallId.value, scratchTemplate.value)
-  scratchDialogVisible.value = false
-  if (count === 0) {
-    ElMessage.info('该殿宇下没有待编排的病害（可能已存在工序）')
-  } else {
-    ElMessage.success(`已为待编排病害生成 ${count} 道工序，可逐条拖拽排序`)
+  try {
+    const count = await repairStore.scaffoldForHall(scratchHallId.value, scratchTemplate.value)
+    scratchDialogVisible.value = false
+    if (count === 0) {
+      ElMessage.info('该殿宇下没有待编排的病害（可能已存在工序）')
+    } else {
+      ElMessage.success(`已为待编排病害生成 ${count} 道工序，可逐条拖拽排序`)
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '批量生成失败')
   }
 }
 
 function handleEmptyAction(): void {
   const first = pendingDecays.value[0]
+  if (first && isDecayLocked(first)) {
+    denyLocked()
+    return
+  }
   if (first) openStepDialog(first.id)
 }
 
@@ -335,13 +401,14 @@ const stateOptions = REPAIR_STATES
         <el-tag
           v-for="decay in pendingDecays"
           :key="decay.id"
-          closable
+          :closable="!isDecayLocked(decay)"
           :disable-transitions="true"
-          type="warning"
+          :type="isDecayLocked(decay) ? 'success' : 'warning'"
           effect="plain"
           @close="openStepDialog(decay.id)"
         >
           {{ decay.type }} / {{ decay.severity }} / {{ formatArea(decay.areaCm2) }}
+          <span v-if="isDecayLocked(decay)">（已移交·只读）</span>
         </el-tag>
       </div>
       <p class="muted pending__hint">点击标签右侧「×」即可为该病害新增第一道工序。</p>
@@ -365,7 +432,17 @@ const stateOptions = REPAIR_STATES
             <el-tag :type="group.percent === 100 ? 'success' : 'info'" effect="plain" round>
               {{ group.doneCount }}/{{ group.totalCount }}（{{ group.percent }}%）
             </el-tag>
-            <el-button size="small" type="danger" text :icon="Delete" @click="removeGroup(group)">清空</el-button>
+            <el-tag v-if="isGroupLocked(group)" type="success" effect="dark" size="small">已移交·只读</el-tag>
+            <el-button
+              size="small"
+              type="danger"
+              text
+              :icon="Delete"
+              :disabled="isGroupLocked(group)"
+              @click="removeGroup(group)"
+            >
+              清空
+            </el-button>
           </div>
         </header>
 
@@ -379,9 +456,10 @@ const stateOptions = REPAIR_STATES
             :class="{
               'is-dragging': draggingId === step.id,
               'is-over': dragOverId === step.id && draggingId !== step.id,
+              'is-locked': isGroupLocked(group),
               [`is-${step.state}`]: true
             }"
-            draggable="true"
+            :draggable="!isGroupLocked(group)"
             @dragstart="onDragStart(step)"
             @dragover="onDragOver(step, $event)"
             @drop="onDrop(group, step)"
@@ -409,6 +487,7 @@ const stateOptions = REPAIR_STATES
                   size="small"
                   placeholder="材料 / 配比"
                   class="step-card__input"
+                  :disabled="isGroupLocked(group)"
                   @blur="commitDraft(step, 'material')"
                   @keyup.enter="commitDraft(step, 'material')"
                 />
@@ -417,6 +496,7 @@ const stateOptions = REPAIR_STATES
                   size="small"
                   placeholder="责任人"
                   class="step-card__input"
+                  :disabled="isGroupLocked(group)"
                   @blur="commitDraft(step, 'operator')"
                   @keyup.enter="commitDraft(step, 'operator')"
                 />
@@ -427,18 +507,42 @@ const stateOptions = REPAIR_STATES
                 :model-value="step.state"
                 size="small"
                 class="step-card__state"
+                :disabled="isGroupLocked(group)"
                 @update:model-value="(value: RepairState) => changeState(step, value)"
               >
                 <el-option v-for="item in stateOptions" :key="item" :label="item" :value="item" />
               </el-select>
-              <el-button size="small" text :icon="Edit" @click="openStepDialog(group.decayId, step)">编辑</el-button>
-              <el-button size="small" text type="danger" @click="removeStep(step)">删除</el-button>
+              <el-button
+                size="small"
+                text
+                :icon="Edit"
+                :disabled="isGroupLocked(group)"
+                @click="openStepDialog(group.decayId, step)"
+              >
+                编辑
+              </el-button>
+              <el-button
+                size="small"
+                text
+                type="danger"
+                :disabled="isGroupLocked(group)"
+                @click="removeStep(step)"
+              >
+                删除
+              </el-button>
             </div>
           </li>
         </ol>
 
         <div class="timeline__add">
-          <el-button size="small" :icon="Plus" @click="openStepDialog(group.decayId)">追加工序</el-button>
+          <el-button
+            size="small"
+            :icon="Plus"
+            :disabled="isGroupLocked(group)"
+            @click="openStepDialog(group.decayId)"
+          >
+            追加工序
+          </el-button>
         </div>
       </article>
     </div>
@@ -487,7 +591,7 @@ const stateOptions = REPAIR_STATES
       <el-form label-width="110px">
         <el-form-item label="目标殿宇">
           <el-select v-model="scratchHallId" class="full-width" placeholder="选择殿宇">
-            <el-option v-for="item in hallOptions" :key="item.value" :label="item.label" :value="item.value" />
+            <el-option v-for="item in editableHallOptions" :key="item.value" :label="item.label" :value="item.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="工序模板">
@@ -625,6 +729,11 @@ const stateOptions = REPAIR_STATES
 .step-card.is-over {
   border-color: #8a5a2b;
   box-shadow: 0 0 0 2px rgba(138, 90, 43, 0.18);
+}
+
+.step-card.is-locked {
+  cursor: default;
+  opacity: 0.92;
 }
 
 .step-card__seq {

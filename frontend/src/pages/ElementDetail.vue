@@ -7,11 +7,13 @@ import { ArrowLeft, Delete, Edit, Plus, Warning } from '@element-plus/icons-vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import SeverityTag from '@/components/common/SeverityTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
-import { useHallStore } from '@/stores/hallStore'
+import DisposalTag from '@/components/common/DisposalTag.vue'
+import { useHallStore, HALL_LOCKED_MESSAGE } from '@/stores/hallStore'
 import { useDecayStore } from '@/stores/decayStore'
 import { ELEMENT_POSITIONS, ELEMENT_STATUSES, type Element, type ElementPosition, type ElementStatus } from '@/types/element'
 import { PATTERN_NAMES, PIGMENTS, type PaintLayer, type PatternName, type Pigment } from '@/types/layer'
 import { DECAY_TYPES, SEVERITIES, type Decay, type DecayType, type Severity } from '@/types/decay'
+import { formatDateTime } from '@/utils/datetime'
 
 const route = useRoute()
 const router = useRouter()
@@ -20,6 +22,9 @@ const decayStore = useDecayStore()
 
 const hallId = computed(() => String(route.params.id ?? ''))
 const hall = computed(() => hallStore.hallById(hallId.value) ?? null)
+/** 已移交殿宇：构件 / 层位 / 病害只能查看 */
+const readonly = computed(() => hall.value?.disposalStatus === '已移交')
+const latestWithdraw = computed(() => (hall.value ? hallStore.latestWithdrawRecord(hall.value.id) : null))
 
 const positionFilter = ref<ElementPosition | ''>('')
 const statusFilter = ref<ElementStatus | ''>('')
@@ -199,12 +204,21 @@ function handleTreeClick(data: TreeNodeData): void {
   selectedId.value = String(data.id)
 }
 
+/** 已移交殿宇的写操作统一提示 */
+function denyLocked(): void {
+  ElMessage.warning(HALL_LOCKED_MESSAGE)
+}
+
 /** 层位展开状态由表格回传，保持与 expandedLayerIds 同步 */
 function handleExpandChange(_row: PaintLayer, expanded: PaintLayer[]): void {
   expandedLayerIds.value = expanded.map((item) => item.id)
 }
 
 function openElementDialog(element?: Element): void {
+  if (readonly.value) {
+    denyLocked()
+    return
+  }
   if (element) {
     editingElementId.value = element.id
     elementForm.position = element.position
@@ -249,6 +263,10 @@ async function submitElement(): Promise<void> {
 }
 
 async function removeElement(element: Element): Promise<void> {
+  if (readonly.value) {
+    denyLocked()
+    return
+  }
   const confirmed = await ElMessageBox.confirm(
     `删除构件「${element.name}」将同时删除其层位与病害记录，是否继续？`,
     '删除确认',
@@ -261,6 +279,10 @@ async function removeElement(element: Element): Promise<void> {
 }
 
 function openLayerDialog(layer?: PaintLayer): void {
+  if (readonly.value) {
+    denyLocked()
+    return
+  }
   if (!selectedElement.value) {
     ElMessage.warning('请先在左侧选择一个构件')
     return
@@ -317,6 +339,10 @@ async function submitLayer(): Promise<void> {
 }
 
 async function removeLayer(layer: PaintLayer): Promise<void> {
+  if (readonly.value) {
+    denyLocked()
+    return
+  }
   const confirmed = await ElMessageBox.confirm(
     `删除第 ${layer.level} 层（${layer.patternName}）将同时删除该层病害记录，是否继续？`,
     '删除确认',
@@ -328,6 +354,10 @@ async function removeLayer(layer: PaintLayer): Promise<void> {
 }
 
 function openDecayDialog(layerId: string): void {
+  if (readonly.value) {
+    denyLocked()
+    return
+  }
   decayForm.layerId = layerId
   decayForm.type = '起甲'
   decayForm.severity = '轻度'
@@ -355,6 +385,10 @@ async function submitDecay(): Promise<void> {
 }
 
 async function removeDecay(decay: Decay): Promise<void> {
+  if (readonly.value) {
+    denyLocked()
+    return
+  }
   const confirmed = await ElMessageBox.confirm('删除该条病害记录及其修复工序？', '删除确认', { type: 'warning' }).catch(
     () => false
   )
@@ -365,6 +399,10 @@ async function removeDecay(decay: Decay): Promise<void> {
 
 async function bumpElementStatus(status: ElementStatus): Promise<void> {
   if (!selectedElement.value) return
+  if (readonly.value) {
+    denyLocked()
+    return
+  }
   await hallStore.updateElement(selectedElement.value.id, { status })
   ElMessage.success(`构件状态已改为「${status}」`)
 }
@@ -397,13 +435,37 @@ const severityOptions = SEVERITIES
       <div>
         <h2>
           {{ hall ? `${hall.name} · 构件与层位` : '构件与层位' }}
+          <DisposalTag v-if="hall" :status="hall.disposalStatus" size="small" />
           <el-button text :icon="ArrowLeft" @click="goBack">返回殿宇总览</el-button>
         </h2>
-        <p v-if="hall">{{ hall.era }} · {{ hall.structureType }} · {{ hall.roofType }}顶 · 共 {{ hallElements.length }} 件构件</p>
+        <p v-if="hall">
+          {{ hall.era }} · {{ hall.structureType }} · {{ hall.roofType }}顶 · 共 {{ hallElements.length }} 件构件
+          <template v-if="hall.disposalStatus === '已移交' && hall.handoverAt">
+            · {{ formatDateTime(hall.handoverAt) }} 移交文管所
+          </template>
+        </p>
         <p v-else class="muted">未找到该殿宇，可能已被删除。</p>
       </div>
-      <el-button type="primary" :icon="Plus" :disabled="!hall" @click="openElementDialog()">新增构件</el-button>
+      <el-button type="primary" :icon="Plus" :disabled="!hall || readonly" @click="openElementDialog()">新增构件</el-button>
     </div>
+
+    <el-alert
+      v-if="hall && readonly"
+      title="该殿宇已移交文管所，构件、层位、病害与工序均锁定为只读；如发现漏项，请由文管所在殿宇总览撤回移交。"
+      type="success"
+      :closable="false"
+      show-icon
+      class="readonly-banner"
+    />
+    <el-alert
+      v-else-if="hall && latestWithdraw"
+      :title="`文管所已撤回移交并退回修缮中，原因：${latestWithdraw.reason}`"
+      :description="`撤回时间：${formatDateTime(latestWithdraw.at)}，现场可继续补录修改`"
+      type="warning"
+      :closable="false"
+      show-icon
+      class="readonly-banner"
+    />
 
     <div v-if="!hall" class="section-card">
       <EmptyPanel
@@ -477,8 +539,17 @@ const severityOptions = SEVERITIES
                   </p>
                 </div>
                 <div class="element-actions">
-                  <el-button size="small" :icon="Edit" @click="openElementDialog(selectedElement)">编辑构件</el-button>
-                  <el-button size="small" type="danger" text :icon="Delete" @click="removeElement(selectedElement)">
+                  <el-button size="small" :icon="Edit" :disabled="readonly" @click="openElementDialog(selectedElement)">
+                    编辑构件
+                  </el-button>
+                  <el-button
+                    size="small"
+                    type="danger"
+                    text
+                    :icon="Delete"
+                    :disabled="readonly"
+                    @click="removeElement(selectedElement)"
+                  >
                     删除构件
                   </el-button>
                 </div>
@@ -490,6 +561,7 @@ const severityOptions = SEVERITIES
                   :key="item"
                   size="small"
                   :type="selectedElement.status === item ? 'primary' : 'default'"
+                  :disabled="readonly"
                   @click="bumpElementStatus(item)"
                 >
                   {{ item }}
@@ -513,7 +585,9 @@ const severityOptions = SEVERITIES
             <div class="section-card">
               <div class="section-card__head">
                 <h3>彩画层位</h3>
-                <el-button type="primary" size="small" :icon="Plus" @click="openLayerDialog()">新增层位</el-button>
+                <el-button type="primary" size="small" :icon="Plus" :disabled="readonly" @click="openLayerDialog()">
+                  新增层位
+                </el-button>
               </div>
 
               <el-table
@@ -528,7 +602,14 @@ const severityOptions = SEVERITIES
                     <div class="layer-decays">
                       <div class="layer-decays__head">
                         <span>该层病害记录（{{ layerDecays(row.id).length }} 条）</span>
-                        <el-button size="small" type="primary" plain :icon="Warning" @click="openDecayDialog(row.id)">
+                        <el-button
+                          size="small"
+                          type="primary"
+                          plain
+                          :icon="Warning"
+                          :disabled="readonly"
+                          @click="openDecayDialog(row.id)"
+                        >
                           挂接病害
                         </el-button>
                       </div>
@@ -549,7 +630,15 @@ const severityOptions = SEVERITIES
                         </el-table-column>
                         <el-table-column label="操作" width="90">
                           <template #default="{ row: decay }">
-                            <el-button size="small" type="danger" text @click="removeDecay(decay)">删除</el-button>
+                            <el-button
+                              size="small"
+                              type="danger"
+                              text
+                              :disabled="readonly"
+                              @click="removeDecay(decay)"
+                            >
+                              删除
+                            </el-button>
                           </template>
                         </el-table-column>
                       </el-table>
@@ -586,11 +675,22 @@ const severityOptions = SEVERITIES
                 </el-table-column>
                 <el-table-column label="操作" width="200">
                   <template #default="{ row }">
-                    <el-button size="small" :icon="Edit" text @click="openLayerDialog(row)">编辑</el-button>
-                    <el-button size="small" type="primary" text :icon="Warning" @click="openDecayDialog(row.id)">
+                    <el-button size="small" :icon="Edit" text :disabled="readonly" @click="openLayerDialog(row)">
+                      编辑
+                    </el-button>
+                    <el-button
+                      size="small"
+                      type="primary"
+                      text
+                      :icon="Warning"
+                      :disabled="readonly"
+                      @click="openDecayDialog(row.id)"
+                    >
                       挂接病害
                     </el-button>
-                    <el-button size="small" type="danger" text @click="removeLayer(row)">删除</el-button>
+                    <el-button size="small" type="danger" text :disabled="readonly" @click="removeLayer(row)">
+                      删除
+                    </el-button>
                   </template>
                 </el-table-column>
               </el-table>
@@ -704,6 +804,10 @@ const severityOptions = SEVERITIES
   background: #ffffff;
   border: 1px solid var(--line);
   border-radius: 10px;
+}
+
+.readonly-banner {
+  margin-bottom: 16px;
 }
 
 .filter-row__label {
