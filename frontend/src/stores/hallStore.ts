@@ -7,6 +7,9 @@ import type { Hall, HallStat } from '@/types/hall'
 import type { PaintLayer } from '@/types/layer'
 import type { Decay } from '@/types/decay'
 
+/** 已移交殿宇的档案已交文管所验收，现场侧不得再改动 */
+export const HALL_READONLY_TIP = '该殿宇已移交文管所，档案只读，如需修改请先撤回移交'
+
 /**
  * 殿宇 store：维护殿宇列表、当前选中殿宇，并派生出各殿宇的病害统计。
  */
@@ -38,6 +41,29 @@ export const useHallStore = defineStore('hall', () => {
   const currentHall = computed<Hall | null>(
     () => halls.value.find((hall) => hall.id === currentHallId.value) ?? null
   )
+
+  /** 已移交殿宇 id 集合：这些殿宇的构件、层位、病害、工序全部只读 */
+  const handedOverHallIds = computed<Set<string>>(
+    () => new Set(halls.value.filter((hall) => hall.disposal === '已移交').map((hall) => hall.id))
+  )
+
+  /** 殿宇是否仍可在现场编辑（未移交） */
+  function isHallEditable(hallId: string | null | undefined): boolean {
+    if (!hallId) return true
+    return !handedOverHallIds.value.has(hallId)
+  }
+
+  /** 层位 id → 所属殿宇 id（跨表归属解析，供只读守卫与移交核查使用） */
+  function hallIdOfLayer(layerId: string): string | null {
+    const layer = layers.value.find((item) => item.id === layerId)
+    if (!layer) return null
+    return elements.value.find((item) => item.id === layer.elementId)?.hallId ?? null
+  }
+
+  /** 写操作守卫：殿宇已移交时拒绝修改，由调用方以提示形式呈现 */
+  function assertHallEditable(hallId: string | null | undefined): void {
+    if (!isHallEditable(hallId)) throw new Error(HALL_READONLY_TIP)
+  }
 
   const eraOptions = computed<string[]>(() =>
     Array.from(new Set(halls.value.map((hall) => hall.era).filter((era) => era.length > 0))).sort()
@@ -112,28 +138,33 @@ export const useHallStore = defineStore('hall', () => {
   async function createElement(
     payload: Omit<Element, 'id' | 'createdAt' | 'updatedAt'>
   ): Promise<Element> {
+    assertHallEditable(payload.hallId)
     return elementsTable.create(payload, 'elem')
   }
 
   async function updateElement(id: string, patch: Partial<Element>): Promise<void> {
+    assertHallEditable(elements.value.find((item) => item.id === id)?.hallId)
     await elementsTable.update(id, patch)
   }
 
   async function createLayer(
     payload: Omit<PaintLayer, 'id' | 'createdAt' | 'updatedAt'>
   ): Promise<PaintLayer> {
+    assertHallEditable(elements.value.find((item) => item.id === payload.elementId)?.hallId)
     const layer = await layersTable.create(payload, 'lay')
     await syncLayerCount(payload.elementId)
     return layer
   }
 
   async function updateLayer(id: string, patch: Partial<PaintLayer>): Promise<void> {
+    assertHallEditable(hallIdOfLayer(id))
     await layersTable.update(id, patch)
     const layer = layers.value.find((item) => item.id === id)
     if (layer) await syncLayerCount(layer.elementId)
   }
 
   async function removeLayer(id: string): Promise<void> {
+    assertHallEditable(hallIdOfLayer(id))
     const layer = layers.value.find((item) => item.id === id)
     const decayIds = decays.value.filter((decay) => decay.layerId === id).map((decay) => decay.id)
     await db.transaction('rw', [db.layers, db.decays, db.repairSteps], async () => {
@@ -146,6 +177,7 @@ export const useHallStore = defineStore('hall', () => {
 
   /** 级联删除构件及其层位、病害、工序 */
   async function removeElement(id: string): Promise<void> {
+    assertHallEditable(elements.value.find((item) => item.id === id)?.hallId)
     const layerIds = layersOfElement(id).map((layer) => layer.id)
     const decayIds = decays.value.filter((decay) => layerIds.includes(decay.layerId)).map((decay) => decay.id)
     await db.transaction(
@@ -185,8 +217,33 @@ export const useHallStore = defineStore('hall', () => {
     await hallsTable.update(id, patch)
   }
 
+  /** 开始修缮：在册 → 修缮中，现场获得编辑权限 */
+  async function startRepair(id: string): Promise<void> {
+    await hallsTable.update(id, { disposal: '修缮中' })
+  }
+
+  /** 退回在册：修缮中 → 在册 */
+  async function backToRegistered(id: string): Promise<void> {
+    await hallsTable.update(id, { disposal: '在册' })
+  }
+
+  /** 确认移交：修缮中 → 已移交并记录时间，此后档案只读 */
+  async function handoverHall(id: string): Promise<void> {
+    await hallsTable.update(id, { disposal: '已移交', handedOverAt: Date.now() })
+  }
+
+  /** 撤回移交：已移交 → 修缮中并恢复编辑，撤回原因留档备查 */
+  async function recallHall(id: string, reason: string): Promise<void> {
+    await hallsTable.update(id, {
+      disposal: '修缮中',
+      lastRecallReason: reason,
+      lastRecalledAt: Date.now()
+    })
+  }
+
   /** 级联删除：殿宇 → 构件 → 层位 → 病害 → 工序 */
   async function removeHall(id: string): Promise<void> {
+    assertHallEditable(id)
     const elementIds = elements.value.filter((element) => element.hallId === id).map((element) => element.id)
     const layerIds = layers.value
       .filter((layer) => elementIds.includes(layer.elementId))
@@ -238,6 +295,9 @@ export const useHallStore = defineStore('hall', () => {
     hallsReady,
     currentHallId,
     currentHall,
+    handedOverHallIds,
+    isHallEditable,
+    hallIdOfLayer,
     keyword,
     eraFilter,
     structureFilter,
@@ -254,6 +314,10 @@ export const useHallStore = defineStore('hall', () => {
     createHall,
     updateHall,
     removeHall,
+    startRepair,
+    backToRegistered,
+    handoverHall,
+    recallHall,
     createElement,
     updateElement,
     removeElement,

@@ -51,7 +51,7 @@ const counts = computed(() => ({
 }))
 
 const storageRows = computed(() => [
-  { table: 'halls（殿宇）', key: 'id, name, era, structureType, roofType, updatedAt', count: counts.value.halls },
+  { table: 'halls（殿宇）', key: 'id, name, era, structureType, roofType, disposal, updatedAt', count: counts.value.halls },
   { table: 'elements（构件）', key: 'id, hallId, position, status, updatedAt', count: counts.value.elements },
   { table: 'layers（彩画层位）', key: 'id, elementId, level, patternName, pigment', count: counts.value.layers },
   {
@@ -214,7 +214,8 @@ const previewKeys: Array<{ key: keyof Pick<BackupPayload, 'halls' | 'elements' |
         </el-table-column>
       </el-table>
       <p class="muted storage-note">
-        版本 1 → 2 的迁移：decays 表补充 repairedAt 索引，修复状态字段缺失的历史数据按 updatedAt 回填。
+        版本 1 → 2 的迁移：decays 表补充 repairedAt 索引，修复状态字段缺失的历史数据按 updatedAt 回填。<br />
+        版本 2 → 3 的迁移：halls 表补充 disposal 索引，历史殿宇缺少处置状态时按「在册」回填。
       </p>
     </div>
 
@@ -238,6 +239,10 @@ const previewKeys: Array<{ key: keyof Pick<BackupPayload, 'halls' | 'elements' |
         <el-radio :value="true">覆盖导入（先清空本地数据）</el-radio>
         <el-radio :value="false">追加导入（重新分配 id，保留现有档案）</el-radio>
       </el-radio-group>
+
+      <p class="muted storage-note">
+        v2 及更早的旧备份没有殿宇处置状态字段，导入后所有殿宇一律按「在册」处理；v3 备份则保留导出时的状态。
+      </p>
 
       <div v-if="importErrors.length > 0" class="import-errors">
         <p v-for="(error, index) in importErrors" :key="index" class="import-errors__item">{{ error }}</p>

@@ -20,6 +20,8 @@ const decayStore = useDecayStore()
 
 const hallId = computed(() => String(route.params.id ?? ''))
 const hall = computed(() => hallStore.hallById(hallId.value) ?? null)
+/** 已移交文管所：构件、层位、病害只能查看 */
+const hallReadonly = computed(() => hall.value?.disposal === '已移交')
 
 const positionFilter = ref<ElementPosition | ''>('')
 const statusFilter = ref<ElementStatus | ''>('')
@@ -199,12 +201,22 @@ function handleTreeClick(data: TreeNodeData): void {
   selectedId.value = String(data.id)
 }
 
+/** 已移交殿宇的写操作统一拦截，与 store 层守卫互为兜底 */
+function denyReadonly(): boolean {
+  if (hallReadonly.value) {
+    ElMessage.warning('该殿宇已移交文管所，档案只读，如需修改请先撤回移交')
+    return true
+  }
+  return false
+}
+
 /** 层位展开状态由表格回传，保持与 expandedLayerIds 同步 */
 function handleExpandChange(_row: PaintLayer, expanded: PaintLayer[]): void {
   expandedLayerIds.value = expanded.map((item) => item.id)
 }
 
 function openElementDialog(element?: Element): void {
+  if (denyReadonly()) return
   if (element) {
     editingElementId.value = element.id
     elementForm.position = element.position
@@ -249,6 +261,7 @@ async function submitElement(): Promise<void> {
 }
 
 async function removeElement(element: Element): Promise<void> {
+  if (denyReadonly()) return
   const confirmed = await ElMessageBox.confirm(
     `删除构件「${element.name}」将同时删除其层位与病害记录，是否继续？`,
     '删除确认',
@@ -261,6 +274,7 @@ async function removeElement(element: Element): Promise<void> {
 }
 
 function openLayerDialog(layer?: PaintLayer): void {
+  if (denyReadonly()) return
   if (!selectedElement.value) {
     ElMessage.warning('请先在左侧选择一个构件')
     return
@@ -317,6 +331,7 @@ async function submitLayer(): Promise<void> {
 }
 
 async function removeLayer(layer: PaintLayer): Promise<void> {
+  if (denyReadonly()) return
   const confirmed = await ElMessageBox.confirm(
     `删除第 ${layer.level} 层（${layer.patternName}）将同时删除该层病害记录，是否继续？`,
     '删除确认',
@@ -328,6 +343,7 @@ async function removeLayer(layer: PaintLayer): Promise<void> {
 }
 
 function openDecayDialog(layerId: string): void {
+  if (denyReadonly()) return
   decayForm.layerId = layerId
   decayForm.type = '起甲'
   decayForm.severity = '轻度'
@@ -355,6 +371,7 @@ async function submitDecay(): Promise<void> {
 }
 
 async function removeDecay(decay: Decay): Promise<void> {
+  if (denyReadonly()) return
   const confirmed = await ElMessageBox.confirm('删除该条病害记录及其修复工序？', '删除确认', { type: 'warning' }).catch(
     () => false
   )
@@ -364,7 +381,7 @@ async function removeDecay(decay: Decay): Promise<void> {
 }
 
 async function bumpElementStatus(status: ElementStatus): Promise<void> {
-  if (!selectedElement.value) return
+  if (!selectedElement.value || denyReadonly()) return
   await hallStore.updateElement(selectedElement.value.id, { status })
   ElMessage.success(`构件状态已改为「${status}」`)
 }
@@ -402,8 +419,18 @@ const severityOptions = SEVERITIES
         <p v-if="hall">{{ hall.era }} · {{ hall.structureType }} · {{ hall.roofType }}顶 · 共 {{ hallElements.length }} 件构件</p>
         <p v-else class="muted">未找到该殿宇，可能已被删除。</p>
       </div>
-      <el-button type="primary" :icon="Plus" :disabled="!hall" @click="openElementDialog()">新增构件</el-button>
+      <el-button type="primary" :icon="Plus" :disabled="!hall || hallReadonly" @click="openElementDialog()">新增构件</el-button>
     </div>
+
+    <el-alert
+      v-if="hall && hallReadonly"
+      type="info"
+      :closable="false"
+      show-icon
+      class="readonly-banner"
+      title="该殿宇已移交文管所，构件、层位、病害与工序仅可查看"
+      description="如需继续修改，请先在殿宇总览撤回移交（退回修缮中）。"
+    />
 
     <div v-if="!hall" class="section-card">
       <EmptyPanel
@@ -477,8 +504,8 @@ const severityOptions = SEVERITIES
                   </p>
                 </div>
                 <div class="element-actions">
-                  <el-button size="small" :icon="Edit" @click="openElementDialog(selectedElement)">编辑构件</el-button>
-                  <el-button size="small" type="danger" text :icon="Delete" @click="removeElement(selectedElement)">
+                  <el-button size="small" :icon="Edit" :disabled="hallReadonly" @click="openElementDialog(selectedElement)">编辑构件</el-button>
+                  <el-button size="small" type="danger" text :icon="Delete" :disabled="hallReadonly" @click="removeElement(selectedElement)">
                     删除构件
                   </el-button>
                 </div>
@@ -490,6 +517,7 @@ const severityOptions = SEVERITIES
                   :key="item"
                   size="small"
                   :type="selectedElement.status === item ? 'primary' : 'default'"
+                  :disabled="hallReadonly"
                   @click="bumpElementStatus(item)"
                 >
                   {{ item }}
@@ -513,7 +541,7 @@ const severityOptions = SEVERITIES
             <div class="section-card">
               <div class="section-card__head">
                 <h3>彩画层位</h3>
-                <el-button type="primary" size="small" :icon="Plus" @click="openLayerDialog()">新增层位</el-button>
+                <el-button type="primary" size="small" :icon="Plus" :disabled="hallReadonly" @click="openLayerDialog()">新增层位</el-button>
               </div>
 
               <el-table
@@ -528,7 +556,7 @@ const severityOptions = SEVERITIES
                     <div class="layer-decays">
                       <div class="layer-decays__head">
                         <span>该层病害记录（{{ layerDecays(row.id).length }} 条）</span>
-                        <el-button size="small" type="primary" plain :icon="Warning" @click="openDecayDialog(row.id)">
+                        <el-button size="small" type="primary" plain :icon="Warning" :disabled="hallReadonly" @click="openDecayDialog(row.id)">
                           挂接病害
                         </el-button>
                       </div>
@@ -549,7 +577,7 @@ const severityOptions = SEVERITIES
                         </el-table-column>
                         <el-table-column label="操作" width="90">
                           <template #default="{ row: decay }">
-                            <el-button size="small" type="danger" text @click="removeDecay(decay)">删除</el-button>
+                            <el-button size="small" type="danger" text :disabled="hallReadonly" @click="removeDecay(decay)">删除</el-button>
                           </template>
                         </el-table-column>
                       </el-table>
@@ -586,11 +614,11 @@ const severityOptions = SEVERITIES
                 </el-table-column>
                 <el-table-column label="操作" width="200">
                   <template #default="{ row }">
-                    <el-button size="small" :icon="Edit" text @click="openLayerDialog(row)">编辑</el-button>
-                    <el-button size="small" type="primary" text :icon="Warning" @click="openDecayDialog(row.id)">
+                    <el-button size="small" :icon="Edit" text :disabled="hallReadonly" @click="openLayerDialog(row)">编辑</el-button>
+                    <el-button size="small" type="primary" text :icon="Warning" :disabled="hallReadonly" @click="openDecayDialog(row.id)">
                       挂接病害
                     </el-button>
-                    <el-button size="small" type="danger" text @click="removeLayer(row)">删除</el-button>
+                    <el-button size="small" type="danger" text :disabled="hallReadonly" @click="removeLayer(row)">删除</el-button>
                   </template>
                 </el-table-column>
               </el-table>
@@ -694,6 +722,10 @@ const severityOptions = SEVERITIES
 </template>
 
 <style scoped>
+.readonly-banner {
+  margin-bottom: 16px;
+}
+
 .filter-row {
   display: flex;
   flex-wrap: wrap;

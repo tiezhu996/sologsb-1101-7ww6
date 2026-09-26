@@ -9,7 +9,7 @@ import SeverityTag from '@/components/common/SeverityTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import { useDecayFilter } from '@/hooks/useDecayFilter'
 import { useHallStore } from '@/stores/hallStore'
-import { useDecayStore } from '@/stores/decayStore'
+import { useDecayStore, type DecayRow } from '@/stores/decayStore'
 import { useRepairStore } from '@/stores/repairStore'
 import { DECAY_TYPES, type Decay, type DecayType, type Severity } from '@/types/decay'
 import { SEVERITIES } from '@/types/decay'
@@ -126,10 +126,27 @@ function repairProgress(decayId: string): { done: number; total: number } {
   return { done: steps.filter((step) => step.state === '已完成').length, total: steps.length }
 }
 
+/** 已移交殿宇的病害记录只读：不可勾选、不可编辑 */
+function isRowReadonly(row: DecayRow): boolean {
+  return row.hallId !== null && hallStore.handedOverHallIds.has(row.hallId)
+}
+
+function selectableRow(row: DecayRow): boolean {
+  return !isRowReadonly(row)
+}
+
+/** 勾选项中剔除已移交殿宇的只读记录，返回可参与批量操作的 id */
+function editableSelectedIds(): string[] {
+  return Array.from(decayStore.selectedIds).filter((id) => {
+    const row = decayStore.rows.find((item) => item.decay.id === id)
+    return !row || !isRowReadonly(row)
+  })
+}
+
 async function applyBatchSeverity(): Promise<void> {
-  const ids = Array.from(decayStore.selectedIds)
+  const ids = editableSelectedIds()
   if (ids.length === 0) {
-    ElMessage.warning('请先勾选需要修改的病害记录')
+    ElMessage.warning('请先勾选需要修改的病害记录（已移交殿宇的记录为只读，不可勾选）')
     return
   }
   await decayStore.bulkSetSeverity(ids, batchSeverity.value)
@@ -137,16 +154,20 @@ async function applyBatchSeverity(): Promise<void> {
 }
 
 async function applyBatchType(): Promise<void> {
-  const ids = Array.from(decayStore.selectedIds)
+  const ids = editableSelectedIds()
   if (ids.length === 0) {
-    ElMessage.warning('请先勾选需要修改的病害记录')
+    ElMessage.warning('请先勾选需要修改的病害记录（已移交殿宇的记录为只读，不可勾选）')
     return
   }
   await decayStore.bulkSetType(ids, batchType.value)
   ElMessage.success(`已将 ${ids.length} 条病害的类型改为「${batchType.value}」`)
 }
 
-function openEdit(row: { decay: Decay }): void {
+function openEdit(row: DecayRow): void {
+  if (isRowReadonly(row)) {
+    ElMessage.warning('该殿宇已移交文管所，病害记录只读')
+    return
+  }
   editingDecay.value = row.decay
   editForm.value = {
     type: row.decay.type,
@@ -169,7 +190,11 @@ async function submitEdit(): Promise<void> {
   ElMessage.success('病害记录已更新')
 }
 
-async function removeRow(row: { decay: Decay }): Promise<void> {
+async function removeRow(row: DecayRow): Promise<void> {
+  if (isRowReadonly(row)) {
+    ElMessage.warning('该殿宇已移交文管所，病害记录只读')
+    return
+  }
   const confirmed = await ElMessageBox.confirm(
     `删除「${row.decay.type}」病害记录及其关联修复工序？`,
     '删除确认',
@@ -180,15 +205,19 @@ async function removeRow(row: { decay: Decay }): Promise<void> {
   ElMessage.success('病害记录已删除')
 }
 
-async function toggleRepaired(row: { decay: Decay }): Promise<void> {
+async function toggleRepaired(row: DecayRow): Promise<void> {
+  if (isRowReadonly(row)) {
+    ElMessage.warning('该殿宇已移交文管所，病害记录只读')
+    return
+  }
   await decayStore.setRepaired(row.decay.id, !row.decay.repaired)
   ElMessage.success(row.decay.repaired ? '已标记为未修复' : '已标记为已修复')
 }
 
 async function bulkMarkRepaired(repaired: boolean): Promise<void> {
-  const ids = Array.from(decayStore.selectedIds)
+  const ids = editableSelectedIds()
   if (ids.length === 0) {
-    ElMessage.warning('请先勾选需要处理的病害记录')
+    ElMessage.warning('请先勾选需要处理的病害记录（已移交殿宇的记录为只读，不可勾选）')
     return
   }
   for (const id of ids) {
@@ -320,7 +349,7 @@ const severityPalette = SEVERITY_COLOR
         :row-key="rowKey"
         @selection-change="handleSelectionChange"
       >
-        <el-table-column type="selection" width="46" reserve-selection />
+        <el-table-column type="selection" width="46" reserve-selection :selectable="selectableRow" />
         <el-table-column label="病害类型" width="100">
           <template #default="{ row }">
             <el-tag size="small" effect="plain">{{ row.decay.type }}</el-tag>
@@ -331,8 +360,11 @@ const severityPalette = SEVERITY_COLOR
             <SeverityTag :severity="row.decay.severity" :area-cm2="row.decay.areaCm2" size="small" />
           </template>
         </el-table-column>
-        <el-table-column label="殿宇" width="150">
-          <template #default="{ row }">{{ hallLabel(row.decay.layerId) }}</template>
+        <el-table-column label="殿宇" width="170">
+          <template #default="{ row }">
+            {{ hallLabel(row.decay.layerId) }}
+            <el-tag v-if="isRowReadonly(row)" size="small" type="success" effect="plain">已移交</el-tag>
+          </template>
         </el-table-column>
         <el-table-column label="构件（部位）" min-width="190">
           <template #default="{ row }">{{ elementLabel(row.decay.layerId) }}</template>
@@ -353,13 +385,13 @@ const severityPalette = SEVERITY_COLOR
         </el-table-column>
         <el-table-column label="操作" width="260" fixed="right">
           <template #default="{ row }">
-            <el-button size="small" text :icon="Edit" @click="openEdit(row)">编辑</el-button>
+            <el-button size="small" text :icon="Edit" :disabled="isRowReadonly(row)" @click="openEdit(row)">编辑</el-button>
             <el-button size="small" text :icon="Tools" @click="goRepair(row)">排工序</el-button>
             <el-button size="small" text type="primary" @click="goElements(row)">看层位</el-button>
-            <el-button size="small" text @click="toggleRepaired(row)">
+            <el-button size="small" text :disabled="isRowReadonly(row)" @click="toggleRepaired(row)">
               {{ row.decay.repaired ? '撤销修复' : '标记修复' }}
             </el-button>
-            <el-button size="small" text type="danger" :icon="Delete" @click="removeRow(row)">删除</el-button>
+            <el-button size="small" text type="danger" :icon="Delete" :disabled="isRowReadonly(row)" @click="removeRow(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>

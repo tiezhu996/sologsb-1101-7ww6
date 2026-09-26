@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, reactive, ref } from 'vue'
 import { db } from '@/utils/db'
 import { useIdbTable } from '@/hooks/useIdbTable'
+import { useHallStore, HALL_READONLY_TIP } from '@/stores/hallStore'
 import {
   createEmptyDecayFilter,
   type Decay,
@@ -148,6 +149,16 @@ export const useDecayStore = defineStore('decay', () => {
       filter.value.onlyUnrepaired
   )
 
+  /** 写操作守卫：病害所属殿宇已移交时拒绝修改 */
+  function assertDecayEditable(decayId: string): void {
+    const hallStore = useHallStore()
+    const decay = decays.value.find((item) => item.id === decayId)
+    if (!decay) return
+    if (!hallStore.isHallEditable(hallStore.hallIdOfLayer(decay.layerId))) {
+      throw new Error(HALL_READONLY_TIP)
+    }
+  }
+
   function patchFilter(patch: Partial<DecayFilterState>): void {
     filter.value = { ...filter.value, ...patch }
   }
@@ -171,14 +182,20 @@ export const useDecayStore = defineStore('decay', () => {
   }
 
   async function createDecay(payload: Omit<Decay, 'id' | 'createdAt' | 'updatedAt'>): Promise<Decay> {
+    const hallStore = useHallStore()
+    if (!hallStore.isHallEditable(hallStore.hallIdOfLayer(payload.layerId))) {
+      throw new Error(HALL_READONLY_TIP)
+    }
     return decaysTable.create(payload, 'dec')
   }
 
   async function updateDecay(id: string, patch: Partial<Decay>): Promise<void> {
+    assertDecayEditable(id)
     await decaysTable.update(id, patch)
   }
 
   async function removeDecay(id: string): Promise<void> {
+    assertDecayEditable(id)
     await db.transaction('rw', [db.decays, db.repairSteps], async () => {
       await db.repairSteps.where('decayId').equals(id).delete()
       await db.decays.delete(id)
@@ -188,6 +205,7 @@ export const useDecayStore = defineStore('decay', () => {
 
   /** 批量改严重程度（档案台批量操作） */
   async function bulkSetSeverity(ids: string[], severity: Severity): Promise<number> {
+    ids.forEach(assertDecayEditable)
     const now = Date.now()
     await db.decays
       .where('id')
@@ -201,6 +219,7 @@ export const useDecayStore = defineStore('decay', () => {
 
   /** 批量改病害类型 */
   async function bulkSetType(ids: string[], type: DecayType): Promise<number> {
+    ids.forEach(assertDecayEditable)
     const now = Date.now()
     await db.decays
       .where('id')
@@ -214,6 +233,7 @@ export const useDecayStore = defineStore('decay', () => {
 
   /** 标记 / 取消已修复，由修复工序完成态调用 */
   async function setRepaired(id: string, repaired: boolean): Promise<void> {
+    assertDecayEditable(id)
     const now = Date.now()
     await decaysTable.update(id, { repaired, repairedAt: repaired ? now : null })
   }

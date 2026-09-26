@@ -6,6 +6,7 @@ import {
   stampBackupTime,
   type BackupPayload
 } from '@/utils/db'
+import { normalizeHallDisposal } from '@/types/hall'
 
 /** 校验备份对象的必备字段，返回错误信息数组（为空表示通过） */
 export function validateBackup(input: unknown): { ok: boolean; errors: string[]; payload: BackupPayload | null } {
@@ -30,7 +31,8 @@ export function validateBackup(input: unknown): { ok: boolean; errors: string[];
     app: 'gbmuralarch',
     dbVersion: typeof obj.dbVersion === 'number' ? obj.dbVersion : DB_VERSION,
     exportedAt: typeof obj.exportedAt === 'string' ? obj.exportedAt : new Date().toISOString(),
-    halls: obj.halls ?? [],
+    // 旧版本备份没有处置状态字段，导入后一律按「在册」处理
+    halls: (obj.halls ?? []).map((hall) => normalizeHallDisposal(hall)),
     elements: obj.elements ?? [],
     layers: obj.layers ?? [],
     decays: obj.decays ?? [],
@@ -175,6 +177,10 @@ export async function seedDemoData(): Promise<void> {
         era: '明嘉靖',
         structureType: '大木',
         roofType: '庑殿',
+        disposal: '修缮中',
+        handedOverAt: null,
+        lastRecallReason: '',
+        lastRecalledAt: null,
         createdAt: now,
         updatedAt: now
       })

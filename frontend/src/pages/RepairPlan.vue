@@ -39,6 +39,7 @@ function syncDrafts(list: RepairStep[]): void {
 watch(() => repairStore.steps, syncDrafts, { immediate: true, deep: false })
 
 function commitDraft(step: RepairStep, field: 'material' | 'operator'): void {
+  if (decayReadonly(step.decayId)) return
   const draft = stepDrafts[step.id]
   if (!draft) return
   const value = draft[field].trim()
@@ -70,6 +71,24 @@ const hallOptions = computed(() =>
   hallStore.halls.map((hall) => ({ label: `${hall.name}（${hall.era}）`, value: hall.id }))
 )
 
+/** 批量生成工序可选殿宇：已移交的只读，排除 */
+const scratchHallOptions = computed(() =>
+  hallStore.halls
+    .filter((hall) => hall.disposal !== '已移交')
+    .map((hall) => ({ label: `${hall.name}（${hall.era}）`, value: hall.id }))
+)
+
+/** 工序组所属殿宇已移交时整组只读 */
+function isGroupReadonly(group: RepairGroup): boolean {
+  const hallId = group.element?.hallId
+  return hallId !== undefined && hallStore.handedOverHallIds.has(hallId)
+}
+
+function decayReadonly(decayId: string): boolean {
+  const hallId = hallStore.hallIdOfLayer(repairStore.decayById(decayId)?.layerId ?? '')
+  return hallId !== null && hallStore.handedOverHallIds.has(hallId)
+}
+
 const groups = computed<RepairGroup[]>(() =>
   repairStore.groups.filter((group) => {
     if (hallFilter.value && group.element?.hallId !== hallFilter.value) return false
@@ -84,9 +103,11 @@ const visibleDoneCount = computed(() => groups.value.reduce((sum, group) => sum 
 
 const pendingDecays = computed(() =>
   repairStore.pendingDecays.filter((decay) => {
-    if (!hallFilter.value) return true
     const layer = decayStore.layers.find((item) => item.id === decay.layerId)
     const element = layer ? decayStore.elements.find((item) => item.id === layer.elementId) : undefined
+    // 已移交殿宇的病害只读，不再进入待编排列表
+    if (element && hallStore.handedOverHallIds.has(element.hallId)) return false
+    if (!hallFilter.value) return true
     return element?.hallId === hallFilter.value
   })
 )
@@ -122,6 +143,10 @@ function groupSubtitle(group: RepairGroup): string {
 }
 
 function openStepDialog(decayId: string, step?: RepairStep): void {
+  if (decayReadonly(decayId)) {
+    ElMessage.warning('该殿宇已移交文管所，工序只读，如需修改请先撤回移交')
+    return
+  }
   stepForm.decayId = decayId
   if (step) {
     editingStepId.value = step.id
@@ -163,6 +188,10 @@ async function submitStep(): Promise<void> {
 }
 
 async function removeStep(step: RepairStep): Promise<void> {
+  if (decayReadonly(step.decayId)) {
+    ElMessage.warning('该殿宇已移交文管所，工序只读')
+    return
+  }
   const confirmed = await ElMessageBox.confirm(`删除工序「${step.name}」？`, '删除确认', { type: 'warning' }).catch(
     () => false
   )
@@ -172,6 +201,10 @@ async function removeStep(step: RepairStep): Promise<void> {
 }
 
 async function removeGroup(group: RepairGroup): Promise<void> {
+  if (isGroupReadonly(group)) {
+    ElMessage.warning('该殿宇已移交文管所，工序只读')
+    return
+  }
   const confirmed = await ElMessageBox.confirm(
     `清空「${groupTitle(group)}」的全部 ${group.steps.length} 道工序？`,
     '删除确认',
@@ -183,6 +216,10 @@ async function removeGroup(group: RepairGroup): Promise<void> {
 }
 
 async function changeState(step: RepairStep, state: RepairState): Promise<void> {
+  if (decayReadonly(step.decayId)) {
+    ElMessage.warning('该殿宇已移交文管所，工序只读')
+    return
+  }
   await repairStore.setStepState(step.id, state)
   const group = repairStore.groupOf(step.decayId)
   if (state === '已完成' && group && group.doneCount === group.totalCount) {
@@ -206,6 +243,7 @@ async function onDrop(group: RepairGroup, target: RepairStep): Promise<void> {
   draggingId.value = null
   dragOverId.value = null
   if (!sourceId || sourceId === target.id) return
+  if (isGroupReadonly(group)) return
   const ordered = group.steps.map((step) => step.id).filter((id) => id !== sourceId)
   const targetIndex = ordered.indexOf(target.id)
   ordered.splice(targetIndex, 0, sourceId)
@@ -214,13 +252,18 @@ async function onDrop(group: RepairGroup, target: RepairStep): Promise<void> {
 }
 
 async function openScratch(): Promise<void> {
-  scratchHallId.value = hallFilter.value || hallStore.halls[0]?.id || ''
+  const filterEditable = hallFilter.value && !hallStore.handedOverHallIds.has(hallFilter.value)
+  scratchHallId.value = filterEditable ? hallFilter.value : scratchHallOptions.value[0]?.value ?? ''
   scratchDialogVisible.value = true
 }
 
 async function submitScratch(): Promise<void> {
   if (!scratchHallId.value) {
     ElMessage.warning('请选择殿宇')
+    return
+  }
+  if (hallStore.handedOverHallIds.has(scratchHallId.value)) {
+    ElMessage.warning('该殿宇已移交文管所，工序只读')
     return
   }
   if (scratchTemplate.value.length === 0) {
@@ -361,11 +404,12 @@ const stateOptions = REPAIR_STATES
             <p class="muted">{{ groupSubtitle(group) }}</p>
           </div>
           <div class="timeline__head-right">
+            <el-tag v-if="isGroupReadonly(group)" type="success" effect="dark" size="small" round>已移交 · 只读</el-tag>
             <SeverityTag v-if="group.decay" :severity="group.decay.severity" size="small" plain />
             <el-tag :type="group.percent === 100 ? 'success' : 'info'" effect="plain" round>
               {{ group.doneCount }}/{{ group.totalCount }}（{{ group.percent }}%）
             </el-tag>
-            <el-button size="small" type="danger" text :icon="Delete" @click="removeGroup(group)">清空</el-button>
+            <el-button size="small" type="danger" text :icon="Delete" :disabled="isGroupReadonly(group)" @click="removeGroup(group)">清空</el-button>
           </div>
         </header>
 
@@ -379,9 +423,10 @@ const stateOptions = REPAIR_STATES
             :class="{
               'is-dragging': draggingId === step.id,
               'is-over': dragOverId === step.id && draggingId !== step.id,
+              'is-readonly': isGroupReadonly(group),
               [`is-${step.state}`]: true
             }"
-            draggable="true"
+            :draggable="!isGroupReadonly(group)"
             @dragstart="onDragStart(step)"
             @dragover="onDragOver(step, $event)"
             @drop="onDrop(group, step)"
@@ -409,6 +454,7 @@ const stateOptions = REPAIR_STATES
                   size="small"
                   placeholder="材料 / 配比"
                   class="step-card__input"
+                  :disabled="isGroupReadonly(group)"
                   @blur="commitDraft(step, 'material')"
                   @keyup.enter="commitDraft(step, 'material')"
                 />
@@ -417,6 +463,7 @@ const stateOptions = REPAIR_STATES
                   size="small"
                   placeholder="责任人"
                   class="step-card__input"
+                  :disabled="isGroupReadonly(group)"
                   @blur="commitDraft(step, 'operator')"
                   @keyup.enter="commitDraft(step, 'operator')"
                 />
@@ -427,18 +474,19 @@ const stateOptions = REPAIR_STATES
                 :model-value="step.state"
                 size="small"
                 class="step-card__state"
+                :disabled="isGroupReadonly(group)"
                 @update:model-value="(value: RepairState) => changeState(step, value)"
               >
                 <el-option v-for="item in stateOptions" :key="item" :label="item" :value="item" />
               </el-select>
-              <el-button size="small" text :icon="Edit" @click="openStepDialog(group.decayId, step)">编辑</el-button>
-              <el-button size="small" text type="danger" @click="removeStep(step)">删除</el-button>
+              <el-button size="small" text :icon="Edit" :disabled="isGroupReadonly(group)" @click="openStepDialog(group.decayId, step)">编辑</el-button>
+              <el-button size="small" text type="danger" :disabled="isGroupReadonly(group)" @click="removeStep(step)">删除</el-button>
             </div>
           </li>
         </ol>
 
         <div class="timeline__add">
-          <el-button size="small" :icon="Plus" @click="openStepDialog(group.decayId)">追加工序</el-button>
+          <el-button size="small" :icon="Plus" :disabled="isGroupReadonly(group)" @click="openStepDialog(group.decayId)">追加工序</el-button>
         </div>
       </article>
     </div>
@@ -487,7 +535,7 @@ const stateOptions = REPAIR_STATES
       <el-form label-width="110px">
         <el-form-item label="目标殿宇">
           <el-select v-model="scratchHallId" class="full-width" placeholder="选择殿宇">
-            <el-option v-for="item in hallOptions" :key="item.value" :label="item.label" :value="item.value" />
+            <el-option v-for="item in scratchHallOptions" :key="item.value" :label="item.label" :value="item.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="工序模板">
@@ -620,6 +668,11 @@ const stateOptions = REPAIR_STATES
 
 .step-card.is-dragging {
   opacity: 0.5;
+}
+
+.step-card.is-readonly {
+  cursor: default;
+  opacity: 0.92;
 }
 
 .step-card.is-over {
